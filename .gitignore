@@ -1,0 +1,46 @@
+# Obsidian plugin
+.obsidian/
+
+# Node modules
+node_modules/
+
+# Build files
+dist/
+build/
+*.js.map
+
+# Development files
+.vscode/
+.idea/
+*.iml
+
+# Debug log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+debug.log
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Cache files
+.cache/
+
+# Test files
+coverage/
+
+# Hot reload
+.hot/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
