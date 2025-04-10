@@ -80,7 +80,6 @@ export default class BlockUtilityPlugin extends Plugin {
 			console.log("BlockUtilityPlugin: Registered 'select-current-block' command.");
 
 		} catch (error) {
-			// Catch potential errors during command registration itself
 			console.error("BlockUtilityPlugin: Failed to register commands during onload:", error);
 			new Notice("Block Utility: Failed to initialize commands. Check console for details.");
 		}
@@ -104,6 +103,7 @@ export default class BlockUtilityPlugin extends Plugin {
 	 * @function findBlockBoundaries
 	 * @description Locates the boundaries (start and end lines) and type of a fenced code block (```)
 	 * or a LaTeX block ($$) that contains the editor's current cursor position.
+	 * It now skips indented (nested) fence markers to only use the root fence.
 	 * @param {Editor} editor - The Obsidian Editor instance representing the current active editor.
 	 * Provides access to cursor position and document content.
 	 * Assumes the editor instance is valid and available.
@@ -123,7 +123,6 @@ export default class BlockUtilityPlugin extends Plugin {
 		try {
 			cursor = editor.getCursor();
 			if (!cursor) {
-				// Precondition check
 				throw new Error("Failed to get cursor position.");
 			}
 			console.debug(`BlockUtilityPlugin: Cursor position: Line ${cursor.line}, Ch ${cursor.ch}`);
@@ -142,80 +141,78 @@ export default class BlockUtilityPlugin extends Plugin {
 		let endDelimiter: '```' | '$$' | null = null;
 		let blockType: 'Code' | 'LaTeX' | null = null;
 
-		// Search backwards from the cursor line to find the start delimiter.
-		console.debug(`BlockUtilityPlugin: Searching backwards for start delimiter from line ${currentLineNum}.`);
+		// Searching backwards for a root start delimiter while skipping indented fences.
+		console.debug(`BlockUtilityPlugin: Searching backwards for root start delimiter from line ${currentLineNum}.`);
 		for (let i = currentLineNum; i >= 0; i--) {
-			let line: string;
+			let originalLine: string;
+			let trimmedLine: string;
 			try {
-				line = editor.getLine(i).trim();
+				originalLine = editor.getLine(i);
+				trimmedLine = originalLine.trim();
 			} catch (err) {
 				console.warn(`BlockUtilityPlugin: Error reading line ${i} during backward search:`, err);
-				continue; // Skip problematic line if reading fails
+				continue;
 			}
 
-			// Check for code block start (allows language specifier like ```python)
-			if (line.startsWith('```')) {
+			// Check for Code block start: must not be indented; allows a language specifier.
+			if (originalLine.startsWith('```') && trimmedLine.startsWith('```')) {
 				startLineNum = i;
 				startDelimiter = '```';
-				endDelimiter = '```'; // End delimiter must match exactly '```'
+				endDelimiter = '```';
 				blockType = 'Code';
-				console.debug(`BlockUtilityPlugin: Found potential Code block start ' ${startDelimiter}' at line ${i}.`);
-				break; // Found the start, stop searching backwards
+				console.debug(`BlockUtilityPlugin: Found potential root Code block start '${startDelimiter}' at line ${i}.`);
+				break;
 			}
-			// Check for LaTeX block start (must be exactly $$ on the line)
-			else if (line === '$$') {
+			// Check for LaTeX block start: must not be indented.
+			else if (originalLine.startsWith('$$') && trimmedLine === '$$') {
 				startLineNum = i;
 				startDelimiter = '$$';
 				endDelimiter = '$$';
 				blockType = 'LaTeX';
-				console.debug(`BlockUtilityPlugin: Found potential LaTeX block start '${startDelimiter}' at line ${i}.`);
-				break; // Found the start, stop searching backwards
+				console.debug(`BlockUtilityPlugin: Found potential root LaTeX block start '${startDelimiter}' at line ${i}.`);
+				break;
 			}
 		}
 
-		// If no start delimiter was found above or at the cursor line, the cursor isn't in a known block.
 		if (startLineNum === -1 || !blockType || !endDelimiter) {
-			console.debug("BlockUtilityPlugin: No start delimiter found enclosing the cursor.");
+			console.debug("BlockUtilityPlugin: No root start delimiter found enclosing the cursor.");
 			return { success: false, startLine: -1, endLine: -1, blockType: null, errorMessage: "Cursor is not inside a recognized block (Code ``` or LaTeX $$)." };
 		}
 
-		// Search forwards from *after* the start line to find the matching end delimiter.
-		console.debug(`BlockUtilityPlugin: Searching forwards for end delimiter '${endDelimiter}' from line ${startLineNum + 1}.`);
+		// Searching forwards for a matching root end delimiter while skipping indented fences.
+		console.debug(`BlockUtilityPlugin: Searching forwards for root end delimiter '${endDelimiter}' from line ${startLineNum + 1}.`);
 		for (let i = startLineNum + 1; i < totalLines; i++) {
-			let line: string;
+			let originalLine: string;
+			let trimmedLine: string;
 			try {
-				line = editor.getLine(i).trim();
+				originalLine = editor.getLine(i);
+				trimmedLine = originalLine.trim();
 			} catch (err) {
 				console.warn(`BlockUtilityPlugin: Error reading line ${i} during forward search:`, err);
-				continue; // Skip problematic line
+				continue;
 			}
 
-			// Check if the line exactly matches the required end delimiter.
-			if (line === endDelimiter) {
+			if (trimmedLine === endDelimiter && originalLine.startsWith(endDelimiter)) {
 				endLineNum = i;
-				console.debug(`BlockUtilityPlugin: Found matching end delimiter '${endDelimiter}' at line ${i}.`);
-				break; // Found the end delimiter
+				console.debug(`BlockUtilityPlugin: Found matching root end delimiter '${endDelimiter}' at line ${i}.`);
+				break;
 			}
 		}
 
-		// If no matching end delimiter was found after the start delimiter, the block is incomplete or invalid.
 		if (endLineNum === -1) {
-			console.debug(`BlockUtilityPlugin: No matching end delimiter '${endDelimiter}' found after line ${startLineNum}.`);
+			console.debug(`BlockUtilityPlugin: No matching root end delimiter '${endDelimiter}' found after line ${startLineNum}.`);
 			return { success: false, startLine: startLineNum, endLine: -1, blockType: blockType, errorMessage: `Could not find the closing ${endDelimiter} for this ${blockType} block.` };
 		}
 
-		// Final check: Ensure the cursor line is strictly between the start and end delimiter lines.
-		// It cannot be on the delimiter lines themselves for content operations.
+		// Ensure the cursor line is strictly between the start and end delimiter lines.
 		if (currentLineNum <= startLineNum || currentLineNum >= endLineNum) {
 			console.debug(`BlockUtilityPlugin: Cursor at line ${currentLineNum} is not strictly between start line ${startLineNum} and end line ${endLineNum}.`);
 			return { success: false, startLine: startLineNum, endLine: endLineNum, blockType: blockType, errorMessage: `Cursor is not inside this ${blockType} block's content area.` };
 		}
 
-		// All checks passed, the cursor is inside a valid, recognized block.
 		console.debug(`BlockUtilityPlugin: Successfully identified ${blockType} block from line ${startLineNum} to ${endLineNum}. Cursor is within content.`);
 		return { success: true, startLine: startLineNum, endLine: endLineNum, blockType: blockType };
 	}
-
 
 	/**
 	 * @function copyBlockUnderCursor
@@ -230,7 +227,6 @@ export default class BlockUtilityPlugin extends Plugin {
 		console.debug("BlockUtilityPlugin: Entering copyBlockUnderCursor function.");
 		const blockInfo = this.findBlockBoundaries(editor);
 
-		// Handle failure reported by findBlockBoundaries
 		if (!blockInfo.success) {
 			console.warn(`BlockUtilityPlugin: Failed to find block boundaries for copy: ${blockInfo.errorMessage}`);
 			new Notice(blockInfo.errorMessage || "Block Utility: Could not identify block for copying.");
@@ -240,12 +236,9 @@ export default class BlockUtilityPlugin extends Plugin {
 		console.debug(`BlockUtilityPlugin: Extracting content for ${blockInfo.blockType} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
 		let blockContent = "";
 		try {
-			// Iterate through the lines *between* the delimiters.
 			for (let i = blockInfo.startLine + 1; i < blockInfo.endLine; i++) {
-				// Append the line content plus a newline character.
 				blockContent += editor.getLine(i) + '\n';
 			}
-			// Remove the potentially extraneous newline added after the last line.
 			if (blockContent.length > 0) {
 				blockContent = blockContent.slice(0, -1);
 			}
@@ -256,15 +249,11 @@ export default class BlockUtilityPlugin extends Plugin {
 			return;
 		}
 
-
-		// Use the asynchronous Clipboard API to write the text.
 		console.debug("BlockUtilityPlugin: Attempting to write content to clipboard.");
 		navigator.clipboard.writeText(blockContent).then(() => {
-			// Success feedback
 			console.log(`BlockUtilityPlugin: Successfully copied ${blockInfo.blockType} block content to clipboard.`);
 			new Notice(`${blockInfo.blockType} block content copied!`);
 		}).catch(err => {
-			// Error feedback
 			console.error(`BlockUtilityPlugin: Failed to copy ${blockInfo.blockType} block content to clipboard: `, err);
 			new Notice(`Block Utility: Error copying ${blockInfo.blockType} block content. See console.`);
 		});
@@ -283,7 +272,6 @@ export default class BlockUtilityPlugin extends Plugin {
 		console.debug("BlockUtilityPlugin: Entering selectBlockUnderCursor function.");
 		const blockInfo = this.findBlockBoundaries(editor);
 
-		// Handle failure reported by findBlockBoundaries
 		if (!blockInfo.success) {
 			console.warn(`BlockUtilityPlugin: Failed to find block boundaries for select: ${blockInfo.errorMessage}`);
 			new Notice(blockInfo.errorMessage || "Block Utility: Could not identify block for selection.");
@@ -291,51 +279,38 @@ export default class BlockUtilityPlugin extends Plugin {
 		}
 
 		console.debug(`BlockUtilityPlugin: Calculating selection range for ${blockInfo.blockType} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
-		// Determine the first and last lines of the actual content.
 		const firstContentLine = blockInfo.startLine + 1;
 		const lastContentLine = blockInfo.endLine - 1;
 
 		try {
-			// Handle the edge case where the block is empty (no lines between delimiters).
 			if (firstContentLine >= blockInfo.endLine) {
 				console.debug("BlockUtilityPlugin: Block is empty. Placing cursor at start of content area.");
-				// Position the cursor at the beginning of the line immediately after the start delimiter.
 				const cursorPosition: EditorPosition = {
 					line: firstContentLine,
-					ch: 0 // Character position 0
+					ch: 0
 				};
-				editor.setSelection(cursorPosition, cursorPosition); // Set start and end the same to place cursor
-				// Optional: Notify user block is empty
-				// new Notice(`${blockInfo.blockType} block is empty.`);
-				return; // Nothing more to do for an empty block
+				editor.setSelection(cursorPosition, cursorPosition);
+				return;
 			}
 
-			// Define the anchor (start) and head (end) positions for the selection.
 			const anchorPos: EditorPosition = {
 				line: firstContentLine,
-				ch: 0 // Character 0: Start at the very beginning of the first content line.
+				ch: 0
 			};
 			console.debug(`BlockUtilityPlugin: Selection anchor: Line ${anchorPos.line}, Ch ${anchorPos.ch}`);
 
-			// Get the length of the last content line to select up to its end.
 			const lastLineLength = editor.getLine(lastContentLine).length;
 			const headPos: EditorPosition = {
 				line: lastContentLine,
-				ch: lastLineLength // Character 'length': Selects up to the end of the last content line.
+				ch: lastLineLength
 			};
 			console.debug(`BlockUtilityPlugin: Selection head: Line ${headPos.line}, Ch ${headPos.ch}`);
 
-
-			// Set the editor's selection range.
 			console.debug("BlockUtilityPlugin: Setting editor selection.");
 			editor.setSelection(anchorPos, headPos);
 			console.log(`BlockUtilityPlugin: Successfully selected content of ${blockInfo.blockType} block.`);
 
-			// Optional: Provide subtle feedback that selection was successful.
-			// new Notice(`${blockInfo.blockType} block content selected.`);
-
 		} catch (error) {
-			// Catch errors during line reading or selection setting.
 			console.error("BlockUtilityPlugin: Error during content selection:", error);
 			new Notice(`Block Utility: Error selecting content within ${blockInfo.blockType} block.`);
 		}
