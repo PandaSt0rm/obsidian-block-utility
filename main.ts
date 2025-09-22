@@ -10,7 +10,7 @@ import { App, Editor, EditorPosition, MarkdownView, Notice, Plugin } from 'obsid
  * @property {'Code' | 'LaTeX' | 'BoxInfo' | 'TagInfo' | null} blockType - The type of block identified.
  * @property {string} [errorMessage] - An optional user-friendly message explaining why the operation failed (e.g., cursor outside block, delimiter mismatch). Included when success is false.
  */
-type BlockType = 'Code' | 'LaTeX' | 'BoxInfo' | 'TagInfo';
+type BlockType = 'Code' | 'LaTeX' | 'BoxInfo' | 'TagInfo' | 'InlineLaTeX';
 
 type BlockDelimiter =
 	'```'
@@ -18,13 +18,16 @@ type BlockDelimiter =
 	| ':::box-info'
 	| ':::end-box-info'
 	| ':::tag-info'
-	| ':::end-tag-info';
+	| ':::end-tag-info'
+	| ':::latex'
+	| ':::end-latex';
 
 const BLOCK_LABELS: Record<BlockType, string> = {
 	Code: 'Code',
 	LaTeX: 'LaTeX',
 	BoxInfo: 'Box Info',
 	TagInfo: 'Tag Info',
+	InlineLaTeX: 'LaTeX',
 };
 
 const getBlockLabel = (blockType: BlockType | null): string => {
@@ -39,6 +42,8 @@ interface BlockInfo {
 	startLine: number;
 	endLine: number;
 	blockType: BlockType | null;
+	startCh?: number;
+	endCh?: number;
 	errorMessage?: string;
 }
 
@@ -208,10 +213,31 @@ export default class BlockUtilityPlugin extends Plugin {
 		const totalLines = editor.lineCount();
 		console.debug(`BlockUtilityPlugin: Total lines in document: ${totalLines}`);
 
+		let inlineLaTeXMatch: { start: number; end: number } | null = null;
+		try {
+			const currentLineText = editor.getLine(currentLineNum);
+			inlineLaTeXMatch = this.findInlineLatexRange(currentLineText, cursor.ch);
+		} catch (err) {
+			console.warn(`BlockUtilityPlugin: Error reading line ${currentLineNum} for inline LaTeX detection:`, err);
+		}
+
+		if (inlineLaTeXMatch) {
+			console.debug(`BlockUtilityPlugin: Inline LaTeX detected on line ${currentLineNum} spanning ch ${inlineLaTeXMatch.start} to ${inlineLaTeXMatch.end}.`);
+			return {
+				success: true,
+				startLine: currentLineNum,
+				endLine: currentLineNum,
+				blockType: 'InlineLaTeX',
+				startCh: inlineLaTeXMatch.start,
+				endCh: inlineLaTeXMatch.end,
+			};
+		}
+
 		let startLineNum = -1;
 		let endLineNum = -1;
 		let startDelimiter: BlockDelimiter | null = null;
 		let endDelimiter: BlockDelimiter | null = null;
+		let blockIndent: string | null = null;
 		let blockType: BlockType | null = null;
 
 		// Searching backwards for a root start delimiter while skipping indented fences.
@@ -228,37 +254,51 @@ export default class BlockUtilityPlugin extends Plugin {
 			}
 
 			const normalizedLine = trimmedLine.toLowerCase();
+			const leadingWhitespaceLength = originalLine.length - trimmedLine.length;
+			const leadingWhitespace = leadingWhitespaceLength > 0 ? originalLine.slice(0, leadingWhitespaceLength) : '';
 
-			// Check for Code block start: must not be indented; allows a language specifier.
-			if (originalLine.startsWith('```') && trimmedLine.startsWith('```')) {
+			// Check for Code block start: allows optional indentation and language specifier.
+			if (trimmedLine.startsWith('```')) {
 				startLineNum = i;
 				startDelimiter = '```';
 				endDelimiter = '```';
 				blockType = 'Code';
+				blockIndent = leadingWhitespace;
 				console.debug(`BlockUtilityPlugin: Found potential root Code block start '${startDelimiter}' at line ${i}.`);
 				break;
 			}
 			// Check for LaTeX block start: must not be indented.
-			else if (originalLine.startsWith('$$') && trimmedLine === '$$') {
+			else if (trimmedLine === '$$') {
 				startLineNum = i;
 				startDelimiter = '$$';
 				endDelimiter = '$$';
 				blockType = 'LaTeX';
+				blockIndent = leadingWhitespace;
 				console.debug(`BlockUtilityPlugin: Found potential root LaTeX block start '${startDelimiter}' at line ${i}.`);
 				break;
-			} else if (originalLine.startsWith(':::') && normalizedLine.startsWith(':::box-info')) {
+			} else if (normalizedLine.startsWith(':::box-info')) {
 				startLineNum = i;
 				startDelimiter = ':::box-info';
 				endDelimiter = ':::end-box-info';
 				blockType = 'BoxInfo';
+				blockIndent = leadingWhitespace;
 				console.debug(`BlockUtilityPlugin: Found potential root Box Info block start at line ${i}.`);
 				break;
-			} else if (originalLine.startsWith(':::') && normalizedLine.startsWith(':::tag-info')) {
+			} else if (normalizedLine.startsWith(':::tag-info')) {
 				startLineNum = i;
 				startDelimiter = ':::tag-info';
 				endDelimiter = ':::end-tag-info';
 				blockType = 'TagInfo';
+				blockIndent = leadingWhitespace;
 				console.debug(`BlockUtilityPlugin: Found potential root Tag Info block start at line ${i}.`);
+				break;
+			} else if (normalizedLine.startsWith(':::latex')) {
+				startLineNum = i;
+				startDelimiter = ':::latex';
+				endDelimiter = ':::end-latex';
+				blockType = 'LaTeX';
+				blockIndent = leadingWhitespace;
+				console.debug(`BlockUtilityPlugin: Found potential root LaTeX fence block start at line ${i}.`);
 				break;
 			}
 		}
@@ -270,7 +310,7 @@ export default class BlockUtilityPlugin extends Plugin {
 				startLine: -1,
 				endLine: -1,
 				blockType: null,
-				errorMessage: "Cursor is not inside a recognized block (Code ``` , LaTeX $$, :::box-info, :::tag-info).",
+				errorMessage: "Cursor is not inside a recognized block (Code ``` , LaTeX $$ or :::latex, :::box-info, :::tag-info).",
 			};
 		}
 
@@ -289,9 +329,22 @@ export default class BlockUtilityPlugin extends Plugin {
 
 			const normalizedLine = trimmedLine.toLowerCase();
 			const normalizedEnd = endDelimiter.toLowerCase();
-			const hasLeadingWhitespace = originalLine.length !== originalLine.trimStart().length;
+			const leadingWhitespaceLength = originalLine.length - trimmedLine.length;
+			const leadingWhitespace = leadingWhitespaceLength > 0 ? originalLine.slice(0, leadingWhitespaceLength) : '';
+			const indentMatches = blockIndent === null ? leadingWhitespaceLength === 0 : leadingWhitespace === blockIndent;
 
-			if (!hasLeadingWhitespace && normalizedLine === normalizedEnd) {
+			if (!indentMatches) {
+				continue;
+			}
+
+			const isCodeFence = endDelimiter === '```';
+			const isDollarFence = endDelimiter === '$$';
+
+			if (
+				(isCodeFence && trimmedLine.startsWith('```') && trimmedLine.replace(/^```/, '').trim().length === 0) ||
+				(isDollarFence && trimmedLine === '$$') ||
+				(!isCodeFence && !isDollarFence && normalizedLine === normalizedEnd)
+			) {
 				endLineNum = i;
 				console.debug(`BlockUtilityPlugin: Found matching root end delimiter '${endDelimiter}' at line ${i}.`);
 				break;
@@ -369,6 +422,33 @@ export default class BlockUtilityPlugin extends Plugin {
 		new Notice(`${blockLabel} block inserted.`);
 	}
 
+	private findInlineLatexRange(lineText: string, cursorCh: number): { start: number; end: number } | null {
+		if (!lineText.includes('$$')) {
+			return null;
+		}
+
+		const inlinePattern = /(?<!\\)\$\$(.*?)(?<!\\)\$\$/g;
+		for (const match of lineText.matchAll(inlinePattern)) {
+			const matchIndex = match.index;
+			if (matchIndex === undefined) {
+				continue;
+			}
+			const matchText = match[0];
+			const startDelimiterEnd = matchIndex + 2;
+			const endDelimiterStart = matchIndex + matchText.length - 2;
+
+			if (startDelimiterEnd > endDelimiterStart) {
+				continue;
+			}
+
+			if (cursorCh >= startDelimiterEnd && cursorCh <= endDelimiterStart) {
+				return { start: startDelimiterEnd, end: endDelimiterStart };
+			}
+		}
+
+		return null;
+	}
+
 	/**
 	 * @function copyBlockUnderCursor
 	 * @description Finds the block containing the cursor and copies its content (excluding delimiters)
@@ -390,14 +470,25 @@ export default class BlockUtilityPlugin extends Plugin {
 
 		const blockLabel = getBlockLabel(blockInfo.blockType);
 
-		console.debug(`BlockUtilityPlugin: Extracting content for ${blockLabel} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
 		let blockContent = "";
+
 		try {
-			for (let i = blockInfo.startLine + 1; i < blockInfo.endLine; i++) {
-				blockContent += editor.getLine(i) + '\n';
-			}
-			if (blockContent.length > 0) {
-				blockContent = blockContent.slice(0, -1);
+			if (
+				blockInfo.blockType === 'InlineLaTeX' &&
+				typeof blockInfo.startCh === 'number' &&
+				typeof blockInfo.endCh === 'number'
+			) {
+				console.debug(`BlockUtilityPlugin: Extracting inline LaTeX content on line ${blockInfo.startLine} between ch ${blockInfo.startCh} and ${blockInfo.endCh}.`);
+				const lineText = editor.getLine(blockInfo.startLine);
+				blockContent = lineText.slice(blockInfo.startCh, blockInfo.endCh);
+			} else {
+				console.debug(`BlockUtilityPlugin: Extracting content for ${blockLabel} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
+				for (let i = blockInfo.startLine + 1; i < blockInfo.endLine; i++) {
+					blockContent += editor.getLine(i) + '\n';
+				}
+				if (blockContent.length > 0) {
+					blockContent = blockContent.slice(0, -1);
+				}
 			}
 			console.debug(`BlockUtilityPlugin: Extracted content length: ${blockContent.length}`);
 		} catch (error) {
@@ -436,6 +527,25 @@ export default class BlockUtilityPlugin extends Plugin {
 		}
 
 		const blockLabel = getBlockLabel(blockInfo.blockType);
+
+		if (
+			blockInfo.blockType === 'InlineLaTeX' &&
+			typeof blockInfo.startCh === 'number' &&
+			typeof blockInfo.endCh === 'number'
+		) {
+			console.debug(`BlockUtilityPlugin: Selecting inline LaTeX content on line ${blockInfo.startLine} between ch ${blockInfo.startCh} and ${blockInfo.endCh}.`);
+			const anchorPos: EditorPosition = {
+				line: blockInfo.startLine,
+				ch: blockInfo.startCh,
+			};
+			const headPos: EditorPosition = {
+				line: blockInfo.endLine,
+				ch: blockInfo.endCh,
+			};
+			editor.setSelection(anchorPos, headPos);
+			console.log(`BlockUtilityPlugin: Successfully selected content of ${blockLabel} block.`);
+			return;
+		}
 
 		console.debug(`BlockUtilityPlugin: Calculating selection range for ${blockLabel} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
 		const firstContentLine = blockInfo.startLine + 1;
