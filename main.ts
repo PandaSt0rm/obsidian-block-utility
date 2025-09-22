@@ -5,16 +5,40 @@ import { App, Editor, EditorPosition, MarkdownView, Notice, Plugin } from 'obsid
  * @description Defines the structure for returning information about a found block.
  *
  * @property {boolean} success - Indicates whether a valid block containing the cursor was successfully found.
- * @property {number} startLine - The line number (0-indexed) of the opening delimiter (``` or $$). -1 if not found or not applicable.
- * @property {number} endLine - The line number (0-indexed) of the closing delimiter (``` or $$). -1 if not found or not applicable.
- * @property {'Code' | 'LaTeX' | null} blockType - The type of block identified ('Code' or 'LaTeX'). null if no block was found.
+ * @property {number} startLine - The line number (0-indexed) of the opening delimiter (``` / $$ / :::box-info / :::tag-info). -1 if not found or not applicable.
+ * @property {number} endLine - The line number (0-indexed) of the closing delimiter (``` / $$ / :::end-box-info / :::end-tag-info). -1 if not found or not applicable.
+ * @property {'Code' | 'LaTeX' | 'BoxInfo' | 'TagInfo' | null} blockType - The type of block identified.
  * @property {string} [errorMessage] - An optional user-friendly message explaining why the operation failed (e.g., cursor outside block, delimiter mismatch). Included when success is false.
  */
+type BlockType = 'Code' | 'LaTeX' | 'BoxInfo' | 'TagInfo';
+
+type BlockDelimiter =
+	'```'
+	| '$$'
+	| ':::box-info'
+	| ':::end-box-info'
+	| ':::tag-info'
+	| ':::end-tag-info';
+
+const BLOCK_LABELS: Record<BlockType, string> = {
+	Code: 'Code',
+	LaTeX: 'LaTeX',
+	BoxInfo: 'Box Info',
+	TagInfo: 'Tag Info',
+};
+
+const getBlockLabel = (blockType: BlockType | null): string => {
+	if (!blockType) {
+		return 'Block';
+	}
+	return BLOCK_LABELS[blockType] ?? 'Block';
+};
+
 interface BlockInfo {
 	success: boolean;
 	startLine: number;
 	endLine: number;
-	blockType: 'Code' | 'LaTeX' | null;
+	blockType: BlockType | null;
 	errorMessage?: string;
 }
 
@@ -22,7 +46,7 @@ interface BlockInfo {
  * @class BlockUtilityPlugin
  * @extends Plugin
  * @description The main class for the Obsidian Block Utility plugin. Handles loading commands
- * for copying and selecting content within code and LaTeX blocks.
+ * for copying and selecting content within code, LaTeX, and info fence blocks.
  */
 export default class BlockUtilityPlugin extends Plugin {
 
@@ -42,7 +66,7 @@ export default class BlockUtilityPlugin extends Plugin {
 			// Command to COPY block content
 			this.addCommand({
 				id: 'copy-current-block',
-				name: 'Copy block under cursor (Code or LaTeX)',
+				name: 'Copy block under cursor (Code/LaTeX/Info)',
 				/**
 				 * @param {Editor} editor - The current editor instance.
 				 * @param {MarkdownView} view - The current markdown view instance.
@@ -62,7 +86,7 @@ export default class BlockUtilityPlugin extends Plugin {
 			// Command to SELECT block content
 			this.addCommand({
 				id: 'select-current-block',
-				name: 'Select block under cursor (Code or LaTeX)',
+				name: 'Select block under cursor (Code/LaTeX/Info)',
 				/**
 				 * @param {Editor} editor - The current editor instance.
 				 * @param {MarkdownView} view - The current markdown view instance.
@@ -78,6 +102,54 @@ export default class BlockUtilityPlugin extends Plugin {
 				}
 			});
 			console.log("BlockUtilityPlugin: Registered 'select-current-block' command.");
+
+			// Command to WRAP selection with :::box-info fence
+			this.addCommand({
+				id: 'wrap-selection-box-info',
+				name: 'Wrap selection with :::box-info block',
+				editorCallback: (editor: Editor) => {
+					console.debug("BlockUtilityPlugin: 'wrap-selection-box-info' command triggered.");
+					try {
+						this.wrapSelectionWithFence(editor, ':::box-info', ':::end-box-info', BLOCK_LABELS.BoxInfo);
+					} catch (error) {
+						console.error("BlockUtilityPlugin: Error wrapping selection with box-info block:", error);
+						new Notice("Block Utility: Failed to wrap selection with :::box-info block. See console.");
+					}
+				},
+			});
+			console.log("BlockUtilityPlugin: Registered 'wrap-selection-box-info' command.");
+
+			// Command to WRAP selection with :::tag-info fence
+			this.addCommand({
+				id: 'wrap-selection-tag-info',
+				name: 'Wrap selection with :::tag-info block',
+				editorCallback: (editor: Editor) => {
+					console.debug("BlockUtilityPlugin: 'wrap-selection-tag-info' command triggered.");
+					try {
+						this.wrapSelectionWithFence(editor, ':::tag-info', ':::end-tag-info', BLOCK_LABELS.TagInfo);
+					} catch (error) {
+						console.error("BlockUtilityPlugin: Error wrapping selection with tag-info block:", error);
+						new Notice("Block Utility: Failed to wrap selection with :::tag-info block. See console.");
+					}
+				},
+			});
+			console.log("BlockUtilityPlugin: Registered 'wrap-selection-tag-info' command.");
+
+			// Command to WRAP selection with :::latex fence
+			this.addCommand({
+				id: 'wrap-selection-latex-fence',
+				name: 'Wrap selection with :::latex block',
+				editorCallback: (editor: Editor) => {
+					console.debug("BlockUtilityPlugin: 'wrap-selection-latex-fence' command triggered.");
+					try {
+						this.wrapSelectionWithFence(editor, ':::latex', ':::end-latex', BLOCK_LABELS.LaTeX);
+					} catch (error) {
+						console.error("BlockUtilityPlugin: Error wrapping selection with latex block:", error);
+						new Notice("Block Utility: Failed to wrap selection with :::latex block. See console.");
+					}
+				},
+			});
+			console.log("BlockUtilityPlugin: Registered 'wrap-selection-latex-fence' command.");
 
 		} catch (error) {
 			console.error("BlockUtilityPlugin: Failed to register commands during onload:", error);
@@ -101,8 +173,9 @@ export default class BlockUtilityPlugin extends Plugin {
 
 	/**
 	 * @function findBlockBoundaries
-	 * @description Locates the boundaries (start and end lines) and type of a fenced code block (```)
-	 * or a LaTeX block ($$) that contains the editor's current cursor position.
+	 * @description Locates the boundaries (start and end lines) and type of a fenced code block (```),
+	 * LaTeX block ($$), or info fence block (:::box-info / :::tag-info) that contains the editor's
+	 * current cursor position.
 	 * It now skips indented (nested) fence markers to only use the root fence.
 	 * @param {Editor} editor - The Obsidian Editor instance representing the current active editor.
 	 * Provides access to cursor position and document content.
@@ -111,7 +184,7 @@ export default class BlockUtilityPlugin extends Plugin {
 	 * - `success`: boolean indicating if a valid block containing the cursor was found.
 	 * - `startLine`: number, the 0-indexed line of the opening delimiter, or -1.
 	 * - `endLine`: number, the 0-indexed line of the closing delimiter, or -1.
-	 * - `blockType`: 'Code' | 'LaTeX' | null, the type of block found.
+	 * - `blockType`: 'Code' | 'LaTeX' | 'BoxInfo' | 'TagInfo' | null, the type of block found.
 	 * - `errorMessage`: string | undefined, a message if success is false.
 	 * @throws {Error} This function aims to handle errors internally by returning `success: false` and an
 	 * `errorMessage`. However, unexpected errors during editor interaction (though unlikely
@@ -137,9 +210,9 @@ export default class BlockUtilityPlugin extends Plugin {
 
 		let startLineNum = -1;
 		let endLineNum = -1;
-		let startDelimiter: '```' | '$$' | null = null;
-		let endDelimiter: '```' | '$$' | null = null;
-		let blockType: 'Code' | 'LaTeX' | null = null;
+		let startDelimiter: BlockDelimiter | null = null;
+		let endDelimiter: BlockDelimiter | null = null;
+		let blockType: BlockType | null = null;
 
 		// Searching backwards for a root start delimiter while skipping indented fences.
 		console.debug(`BlockUtilityPlugin: Searching backwards for root start delimiter from line ${currentLineNum}.`);
@@ -153,6 +226,8 @@ export default class BlockUtilityPlugin extends Plugin {
 				console.warn(`BlockUtilityPlugin: Error reading line ${i} during backward search:`, err);
 				continue;
 			}
+
+			const normalizedLine = trimmedLine.toLowerCase();
 
 			// Check for Code block start: must not be indented; allows a language specifier.
 			if (originalLine.startsWith('```') && trimmedLine.startsWith('```')) {
@@ -171,12 +246,32 @@ export default class BlockUtilityPlugin extends Plugin {
 				blockType = 'LaTeX';
 				console.debug(`BlockUtilityPlugin: Found potential root LaTeX block start '${startDelimiter}' at line ${i}.`);
 				break;
+			} else if (originalLine.startsWith(':::') && normalizedLine.startsWith(':::box-info')) {
+				startLineNum = i;
+				startDelimiter = ':::box-info';
+				endDelimiter = ':::end-box-info';
+				blockType = 'BoxInfo';
+				console.debug(`BlockUtilityPlugin: Found potential root Box Info block start at line ${i}.`);
+				break;
+			} else if (originalLine.startsWith(':::') && normalizedLine.startsWith(':::tag-info')) {
+				startLineNum = i;
+				startDelimiter = ':::tag-info';
+				endDelimiter = ':::end-tag-info';
+				blockType = 'TagInfo';
+				console.debug(`BlockUtilityPlugin: Found potential root Tag Info block start at line ${i}.`);
+				break;
 			}
 		}
 
 		if (startLineNum === -1 || !blockType || !endDelimiter) {
 			console.debug("BlockUtilityPlugin: No root start delimiter found enclosing the cursor.");
-			return { success: false, startLine: -1, endLine: -1, blockType: null, errorMessage: "Cursor is not inside a recognized block (Code ``` or LaTeX $$)." };
+			return {
+				success: false,
+				startLine: -1,
+				endLine: -1,
+				blockType: null,
+				errorMessage: "Cursor is not inside a recognized block (Code ``` , LaTeX $$, :::box-info, :::tag-info).",
+			};
 		}
 
 		// Searching forwards for a matching root end delimiter while skipping indented fences.
@@ -192,7 +287,11 @@ export default class BlockUtilityPlugin extends Plugin {
 				continue;
 			}
 
-			if (trimmedLine === endDelimiter && originalLine.startsWith(endDelimiter)) {
+			const normalizedLine = trimmedLine.toLowerCase();
+			const normalizedEnd = endDelimiter.toLowerCase();
+			const hasLeadingWhitespace = originalLine.length !== originalLine.trimStart().length;
+
+			if (!hasLeadingWhitespace && normalizedLine === normalizedEnd) {
 				endLineNum = i;
 				console.debug(`BlockUtilityPlugin: Found matching root end delimiter '${endDelimiter}' at line ${i}.`);
 				break;
@@ -214,6 +313,62 @@ export default class BlockUtilityPlugin extends Plugin {
 		return { success: true, startLine: startLineNum, endLine: endLineNum, blockType: blockType };
 	}
 
+	private normalizeSelection(editor: Editor): { from: EditorPosition; to: EditorPosition } {
+		const selections = editor.listSelections();
+		if (!selections || selections.length === 0) {
+			const cursor = editor.getCursor();
+			return {
+				from: { line: cursor.line, ch: cursor.ch },
+				to: { line: cursor.line, ch: cursor.ch },
+			};
+		}
+		const primary = selections[0];
+		const { anchor, head } = primary;
+		const anchorBeforeHead =
+			anchor.line < head.line || (anchor.line === head.line && anchor.ch <= head.ch);
+		const start = anchorBeforeHead ? anchor : head;
+		const end = anchorBeforeHead ? head : anchor;
+		return {
+			from: { line: start.line, ch: start.ch },
+			to: { line: end.line, ch: end.ch },
+		};
+	}
+
+	private wrapSelectionWithFence(
+		editor: Editor,
+		startFence: string,
+		endFence: string,
+		blockLabel: string,
+	): void {
+		const PLACEHOLDER = 'Your text here';
+		const { from, to } = this.normalizeSelection(editor);
+		const selectedText = editor.getRange(from, to);
+		const hasSelection = selectedText.length > 0;
+		const innerContent = hasSelection ? selectedText : PLACEHOLDER;
+		const wrapped = `${startFence}\n${innerContent}\n${endFence}`;
+
+		editor.replaceRange(wrapped, from, to);
+
+		const innerLines = innerContent.split('\n');
+		const innerStartLine = from.line + 1;
+		const innerEndLine = innerStartLine + innerLines.length - 1;
+		const endCh = innerLines.length === 1 ? innerLines[0].length : innerLines[innerLines.length - 1].length;
+
+		if (hasSelection) {
+			editor.setSelection(
+				{ line: innerStartLine, ch: 0 },
+				{ line: innerEndLine, ch: endCh },
+			);
+		} else {
+			editor.setSelection(
+				{ line: innerStartLine, ch: 0 },
+				{ line: innerStartLine, ch: PLACEHOLDER.length },
+			);
+		}
+
+		new Notice(`${blockLabel} block inserted.`);
+	}
+
 	/**
 	 * @function copyBlockUnderCursor
 	 * @description Finds the block containing the cursor and copies its content (excluding delimiters)
@@ -233,7 +388,9 @@ export default class BlockUtilityPlugin extends Plugin {
 			return;
 		}
 
-		console.debug(`BlockUtilityPlugin: Extracting content for ${blockInfo.blockType} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
+		const blockLabel = getBlockLabel(blockInfo.blockType);
+
+		console.debug(`BlockUtilityPlugin: Extracting content for ${blockLabel} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
 		let blockContent = "";
 		try {
 			for (let i = blockInfo.startLine + 1; i < blockInfo.endLine; i++) {
@@ -245,17 +402,17 @@ export default class BlockUtilityPlugin extends Plugin {
 			console.debug(`BlockUtilityPlugin: Extracted content length: ${blockContent.length}`);
 		} catch (error) {
 			console.error("BlockUtilityPlugin: Error during content extraction:", error);
-			new Notice(`Block Utility: Error extracting content from ${blockInfo.blockType} block.`);
+			new Notice(`Block Utility: Error extracting content from ${blockLabel} block.`);
 			return;
 		}
 
 		console.debug("BlockUtilityPlugin: Attempting to write content to clipboard.");
 		navigator.clipboard.writeText(blockContent).then(() => {
-			console.log(`BlockUtilityPlugin: Successfully copied ${blockInfo.blockType} block content to clipboard.`);
-			new Notice(`${blockInfo.blockType} block content copied!`);
+			console.log(`BlockUtilityPlugin: Successfully copied ${blockLabel} block content to clipboard.`);
+			new Notice(`${blockLabel} block content copied!`);
 		}).catch(err => {
-			console.error(`BlockUtilityPlugin: Failed to copy ${blockInfo.blockType} block content to clipboard: `, err);
-			new Notice(`Block Utility: Error copying ${blockInfo.blockType} block content. See console.`);
+			console.error(`BlockUtilityPlugin: Failed to copy ${blockLabel} block content to clipboard: `, err);
+			new Notice(`Block Utility: Error copying ${blockLabel} block content. See console.`);
 		});
 	}
 
@@ -278,7 +435,9 @@ export default class BlockUtilityPlugin extends Plugin {
 			return;
 		}
 
-		console.debug(`BlockUtilityPlugin: Calculating selection range for ${blockInfo.blockType} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
+		const blockLabel = getBlockLabel(blockInfo.blockType);
+
+		console.debug(`BlockUtilityPlugin: Calculating selection range for ${blockLabel} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
 		const firstContentLine = blockInfo.startLine + 1;
 		const lastContentLine = blockInfo.endLine - 1;
 
@@ -308,11 +467,11 @@ export default class BlockUtilityPlugin extends Plugin {
 
 			console.debug("BlockUtilityPlugin: Setting editor selection.");
 			editor.setSelection(anchorPos, headPos);
-			console.log(`BlockUtilityPlugin: Successfully selected content of ${blockInfo.blockType} block.`);
+			console.log(`BlockUtilityPlugin: Successfully selected content of ${blockLabel} block.`);
 
 		} catch (error) {
 			console.error("BlockUtilityPlugin: Error during content selection:", error);
-			new Notice(`Block Utility: Error selecting content within ${blockInfo.blockType} block.`);
+			new Notice(`Block Utility: Error selecting content within ${blockLabel} block.`);
 		}
 	}
 }
