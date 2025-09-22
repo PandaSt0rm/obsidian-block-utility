@@ -8,6 +8,7 @@ Block Utility adds quick actions for common fenced content in Obsidian. It under
 
 - Copy block under cursor (Code/LaTeX/Info)
 - Select block under cursor (Code/LaTeX/Info)
+- Remove selected block (Code/LaTeX/Info)
 - Wrap selection with :::box-info block
 - Wrap selection with :::tag-info block
 - Wrap selection with :::latex block

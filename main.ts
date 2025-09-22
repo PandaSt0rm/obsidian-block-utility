@@ -44,7 +44,16 @@ interface BlockInfo {
 	blockType: BlockType | null;
 	startCh?: number;
 	endCh?: number;
+	outerStartCh?: number;
+	outerEndCh?: number;
 	errorMessage?: string;
+}
+
+interface InlineLatexMatch {
+	start: number;
+	end: number;
+	outerStart: number;
+	outerEnd: number;
 }
 
 /**
@@ -156,6 +165,22 @@ export default class BlockUtilityPlugin extends Plugin {
 			});
 			console.log("BlockUtilityPlugin: Registered 'wrap-selection-latex-fence' command.");
 
+			// Command to REMOVE fences from the current block
+			this.addCommand({
+				id: 'remove-current-block-fence',
+				name: 'Remove fences around block under cursor',
+				editorCallback: (editor: Editor) => {
+					console.debug("BlockUtilityPlugin: 'remove-current-block-fence' command triggered.");
+					try {
+						this.removeBlockFence(editor);
+					} catch (error) {
+						console.error("BlockUtilityPlugin: Error removing fences from block:", error);
+						new Notice("Block Utility: Failed to remove block fences. See console.");
+					}
+				},
+			});
+			console.log("BlockUtilityPlugin: Registered 'remove-current-block-fence' command.");
+
 		} catch (error) {
 			console.error("BlockUtilityPlugin: Failed to register commands during onload:", error);
 			new Notice("Block Utility: Failed to initialize commands. Check console for details.");
@@ -212,26 +237,6 @@ export default class BlockUtilityPlugin extends Plugin {
 		const currentLineNum = cursor.line;
 		const totalLines = editor.lineCount();
 		console.debug(`BlockUtilityPlugin: Total lines in document: ${totalLines}`);
-
-		let inlineLaTeXMatch: { start: number; end: number } | null = null;
-		try {
-			const currentLineText = editor.getLine(currentLineNum);
-			inlineLaTeXMatch = this.findInlineLatexRange(currentLineText, cursor.ch);
-		} catch (err) {
-			console.warn(`BlockUtilityPlugin: Error reading line ${currentLineNum} for inline LaTeX detection:`, err);
-		}
-
-		if (inlineLaTeXMatch) {
-			console.debug(`BlockUtilityPlugin: Inline LaTeX detected on line ${currentLineNum} spanning ch ${inlineLaTeXMatch.start} to ${inlineLaTeXMatch.end}.`);
-			return {
-				success: true,
-				startLine: currentLineNum,
-				endLine: currentLineNum,
-				blockType: 'InlineLaTeX',
-				startCh: inlineLaTeXMatch.start,
-				endCh: inlineLaTeXMatch.end,
-			};
-		}
 
 		let startLineNum = -1;
 		let endLineNum = -1;
@@ -304,6 +309,28 @@ export default class BlockUtilityPlugin extends Plugin {
 		}
 
 		if (startLineNum === -1 || !blockType || !endDelimiter) {
+			let inlineLaTeXMatch: InlineLatexMatch | null = null;
+			try {
+				const currentLineText = editor.getLine(currentLineNum);
+				inlineLaTeXMatch = this.findInlineLatexRange(currentLineText, cursor.ch);
+			} catch (err) {
+				console.warn(`BlockUtilityPlugin: Error reading line ${currentLineNum} for inline LaTeX detection:`, err);
+			}
+
+			if (inlineLaTeXMatch) {
+				console.debug(`BlockUtilityPlugin: Inline LaTeX detected on line ${currentLineNum} spanning ch ${inlineLaTeXMatch.start} to ${inlineLaTeXMatch.end}.`);
+				return {
+					success: true,
+					startLine: currentLineNum,
+					endLine: currentLineNum,
+					blockType: 'InlineLaTeX',
+					startCh: inlineLaTeXMatch.start,
+					endCh: inlineLaTeXMatch.end,
+					outerStartCh: inlineLaTeXMatch.outerStart,
+					outerEndCh: inlineLaTeXMatch.outerEnd,
+				};
+			}
+
 			console.debug("BlockUtilityPlugin: No root start delimiter found enclosing the cursor.");
 			return {
 				success: false,
@@ -422,7 +449,7 @@ export default class BlockUtilityPlugin extends Plugin {
 		new Notice(`${blockLabel} block inserted.`);
 	}
 
-	private findInlineLatexRange(lineText: string, cursorCh: number): { start: number; end: number } | null {
+	private findInlineLatexRange(lineText: string, cursorCh: number): InlineLatexMatch | null {
 		if (!lineText.includes('$$')) {
 			return null;
 		}
@@ -442,11 +469,84 @@ export default class BlockUtilityPlugin extends Plugin {
 			}
 
 			if (cursorCh >= startDelimiterEnd && cursorCh <= endDelimiterStart) {
-				return { start: startDelimiterEnd, end: endDelimiterStart };
+				return { start: startDelimiterEnd, end: endDelimiterStart, outerStart: matchIndex, outerEnd: matchIndex + matchText.length };
 			}
 		}
 
 		return null;
+	}
+
+	private removeBlockFence(editor: Editor): void {
+		console.debug('BlockUtilityPlugin: Entering removeBlockFence function.');
+		const blockInfo = this.findBlockBoundaries(editor);
+
+		if (!blockInfo.success || !blockInfo.blockType) {
+			console.warn(`BlockUtilityPlugin: Cannot remove fences because block was not identified: ${blockInfo.errorMessage}`);
+			new Notice(blockInfo.errorMessage || 'Block Utility: Could not identify block for fence removal.');
+			return;
+		}
+
+		const blockLabel = getBlockLabel(blockInfo.blockType);
+
+		try {
+			if (
+				blockInfo.blockType === 'InlineLaTeX' &&
+				typeof blockInfo.startCh === 'number' &&
+				typeof blockInfo.endCh === 'number' &&
+				typeof blockInfo.outerStartCh === 'number' &&
+				typeof blockInfo.outerEndCh === 'number'
+			) {
+				const lineText = editor.getLine(blockInfo.startLine);
+				const innerContent = lineText.slice(blockInfo.startCh, blockInfo.endCh);
+				const from = { line: blockInfo.startLine, ch: blockInfo.outerStartCh };
+				const to = { line: blockInfo.endLine, ch: blockInfo.outerEndCh };
+				editor.replaceRange(innerContent, from, to);
+
+				const selectionStart: EditorPosition = { line: blockInfo.startLine, ch: blockInfo.outerStartCh };
+				const selectionEnd: EditorPosition = {
+					line: blockInfo.startLine,
+					ch: blockInfo.outerStartCh + innerContent.length,
+				};
+				editor.setSelection(selectionStart, selectionEnd);
+			} else {
+				const contentLineCount = blockInfo.endLine - blockInfo.startLine - 1;
+				this.removeFenceLine(editor, blockInfo.endLine);
+				this.removeFenceLine(editor, blockInfo.startLine);
+
+				if (contentLineCount > 0) {
+					const firstContentLine = blockInfo.startLine;
+					const lastContentLine = blockInfo.startLine + contentLineCount - 1;
+					const lastLineLength = editor.getLine(lastContentLine).length;
+					editor.setSelection(
+						{ line: firstContentLine, ch: 0 },
+						{ line: lastContentLine, ch: lastLineLength },
+					);
+				} else {
+					const cursorPosition: EditorPosition = { line: blockInfo.startLine, ch: 0 };
+					editor.setSelection(cursorPosition, cursorPosition);
+				}
+			}
+
+			console.log(`BlockUtilityPlugin: Removed fences around ${blockLabel} block.`);
+			new Notice(`${blockLabel} block fences removed.`);
+		} catch (error) {
+			console.error('BlockUtilityPlugin: Error while removing block fences:', error);
+			new Notice(`Block Utility: Error removing ${blockLabel} block fences.`);
+		}
+	}
+
+	private removeFenceLine(editor: Editor, line: number): void {
+		const lineCount = editor.lineCount();
+		if (line < 0 || line >= lineCount) {
+			return;
+		}
+
+		const from = { line, ch: 0 };
+		const to = line === lineCount - 1
+			? { line, ch: editor.getLine(line).length }
+			: { line: line + 1, ch: 0 };
+
+		editor.replaceRange('', from, to);
 	}
 
 	/**
