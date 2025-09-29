@@ -2,25 +2,31 @@ import { App, Editor, EditorPosition, MarkdownView, Notice, Plugin } from 'obsid
 
 /**
  * @interface BlockInfo
- * @description Defines the structure for returning information about a found block.
+ * @description Defines the structure for returning information about a fenced region.
  *
- * @property {boolean} success - Indicates whether a valid block containing the cursor was successfully found.
- * @property {number} startLine - The line number (0-indexed) of the opening delimiter (``` / $$ / :::box-info / :::tag-info). -1 if not found or not applicable.
- * @property {number} endLine - The line number (0-indexed) of the closing delimiter (``` / $$ / :::end-box-info / :::end-tag-info). -1 if not found or not applicable.
- * @property {'Code' | 'LaTeX' | 'BoxInfo' | 'TagInfo' | null} blockType - The type of block identified.
- * @property {string} [errorMessage] - An optional user-friendly message explaining why the operation failed (e.g., cursor outside block, delimiter mismatch). Included when success is false.
+ * @property {boolean} success - Indicates whether a valid fenced region containing the cursor was successfully found.
+ * @property {number} startLine - The line number (0-indexed) of the opening delimiter (``` / ~~~ / $$ / :::box-info / :::tag-info / :::...). -1 if not found or not applicable.
+ * @property {number} endLine - The line number (0-indexed) of the closing delimiter (``` / ~~~ / $$ / :::end-... / :::). -1 if not found or not applicable.
+ * @property {BlockType | null} blockType - The type of fenced content identified.
+ * @property {string} [errorMessage] - An optional user-friendly message explaining why the operation failed (e.g., cursor outside fence, delimiter mismatch). Included when success is false.
  */
-type BlockType = 'Code' | 'LaTeX' | 'BoxInfo' | 'TagInfo' | 'InlineLaTeX';
+type BlockType =
+	| 'Code'
+	| 'LaTeX'
+	| 'BoxInfo'
+	| 'TagInfo'
+	| 'InlineLaTeX'
+	| 'InlineMath'
+	| 'InlineCode'
+	| 'InlineItalic'
+	| 'InlineBold'
+	| 'InlineBoldItalic'
+	| 'InlineUnderline'
+	| 'InlineStrikethrough'
+	| 'InlineHighlight'
+	| 'GenericFence';
 
-type BlockDelimiter =
-	'```'
-	| '$$'
-	| ':::box-info'
-	| ':::end-box-info'
-	| ':::tag-info'
-	| ':::end-tag-info'
-	| ':::latex'
-	| ':::end-latex';
+type BlockDelimiter = string;
 
 const BLOCK_LABELS: Record<BlockType, string> = {
 	Code: 'Code',
@@ -28,13 +34,22 @@ const BLOCK_LABELS: Record<BlockType, string> = {
 	BoxInfo: 'Box Info',
 	TagInfo: 'Tag Info',
 	InlineLaTeX: 'LaTeX',
+	InlineMath: 'LaTeX',
+	InlineCode: 'Inline Code',
+	InlineItalic: 'Italic',
+	InlineBold: 'Bold',
+	InlineBoldItalic: 'Bold/Italic',
+	InlineUnderline: 'Underline',
+	InlineStrikethrough: 'Strikethrough',
+	InlineHighlight: 'Highlight',
+	GenericFence: 'Markdown fence',
 };
 
 const getBlockLabel = (blockType: BlockType | null): string => {
 	if (!blockType) {
-		return 'Block';
+		return 'Fence';
 	}
-	return BLOCK_LABELS[blockType] ?? 'Block';
+	return BLOCK_LABELS[blockType] ?? 'Fence';
 };
 
 interface BlockInfo {
@@ -49,18 +64,49 @@ interface BlockInfo {
 	errorMessage?: string;
 }
 
-interface InlineLatexMatch {
-	start: number;
-	end: number;
+interface InlineFenceMatch {
+	blockType: Extract<
+		BlockType,
+		| 'InlineLaTeX'
+		| 'InlineMath'
+		| 'InlineCode'
+		| 'InlineItalic'
+		| 'InlineBold'
+		| 'InlineBoldItalic'
+		| 'InlineUnderline'
+		| 'InlineStrikethrough'
+		| 'InlineHighlight'
+	>;
+	contentStart: number;
+	contentEnd: number;
 	outerStart: number;
 	outerEnd: number;
+}
+
+interface InlineFormattingRule {
+	char: string;
+	blockTypesByLength: Partial<Record<number, InlineFenceMatch['blockType']>>;
+}
+
+interface FenceDetection {
+	blockType: BlockType;
+	startDelimiter: BlockDelimiter;
+	endDelimiter: BlockDelimiter;
+	indent: string;
+	closingMatcher: (trimmedLine: string) => boolean;
+}
+
+interface CursorFenceState {
+	inBacktickCode: boolean;
+	inTildeCode: boolean;
+	inDollarLatex: boolean;
 }
 
 /**
  * @class BlockUtilityPlugin
  * @extends Plugin
  * @description The main class for the Obsidian Block Utility plugin. Handles loading commands
- * for copying and selecting content within code, LaTeX, and info fence blocks.
+ * for copying, selecting, wrapping, and removing Markdown fences (code, math, info, and inline).
  */
 export default class BlockUtilityPlugin extends Plugin {
 
@@ -77,10 +123,10 @@ export default class BlockUtilityPlugin extends Plugin {
 		console.log(`BlockUtilityPlugin: Loading plugin... Start time: ${startTime}`);
 
 		try {
-			// Command to COPY block content
+			// Command to copy fenced content
 			this.addCommand({
 				id: 'copy-current-block',
-				name: 'Copy block under cursor (Code/LaTeX/Info)',
+				name: 'Copy fenced content under cursor',
 				/**
 				 * @param {Editor} editor - The current editor instance.
 				 * @param {MarkdownView} view - The current markdown view instance.
@@ -97,10 +143,10 @@ export default class BlockUtilityPlugin extends Plugin {
 			});
 			console.log("BlockUtilityPlugin: Registered 'copy-current-block' command.");
 
-			// Command to SELECT block content
+			// Command to select fenced content
 			this.addCommand({
 				id: 'select-current-block',
-				name: 'Select block under cursor (Code/LaTeX/Info)',
+				name: 'Select fenced content under cursor',
 				/**
 				 * @param {Editor} editor - The current editor instance.
 				 * @param {MarkdownView} view - The current markdown view instance.
@@ -120,14 +166,14 @@ export default class BlockUtilityPlugin extends Plugin {
 			// Command to WRAP selection with :::box-info fence
 			this.addCommand({
 				id: 'wrap-selection-box-info',
-				name: 'Wrap selection with :::box-info block',
+				name: 'Wrap selection with :::box-info fence',
 				editorCallback: (editor: Editor) => {
 					console.debug("BlockUtilityPlugin: 'wrap-selection-box-info' command triggered.");
 					try {
 						this.wrapSelectionWithFence(editor, ':::box-info', ':::end-box-info', BLOCK_LABELS.BoxInfo);
 					} catch (error) {
 						console.error("BlockUtilityPlugin: Error wrapping selection with box-info block:", error);
-						new Notice("Block Utility: Failed to wrap selection with :::box-info block. See console.");
+						new Notice('Block Utility: Failed to wrap selection with :::box-info fence. See console.');
 					}
 				},
 			});
@@ -136,14 +182,14 @@ export default class BlockUtilityPlugin extends Plugin {
 			// Command to WRAP selection with :::tag-info fence
 			this.addCommand({
 				id: 'wrap-selection-tag-info',
-				name: 'Wrap selection with :::tag-info block',
+				name: 'Wrap selection with :::tag-info fence',
 				editorCallback: (editor: Editor) => {
 					console.debug("BlockUtilityPlugin: 'wrap-selection-tag-info' command triggered.");
 					try {
 						this.wrapSelectionWithFence(editor, ':::tag-info', ':::end-tag-info', BLOCK_LABELS.TagInfo);
 					} catch (error) {
 						console.error("BlockUtilityPlugin: Error wrapping selection with tag-info block:", error);
-						new Notice("Block Utility: Failed to wrap selection with :::tag-info block. See console.");
+						new Notice('Block Utility: Failed to wrap selection with :::tag-info fence. See console.');
 					}
 				},
 			});
@@ -152,30 +198,30 @@ export default class BlockUtilityPlugin extends Plugin {
 			// Command to WRAP selection with :::latex fence
 			this.addCommand({
 				id: 'wrap-selection-latex-fence',
-				name: 'Wrap selection with :::latex block',
+				name: 'Wrap selection with :::latex fence',
 				editorCallback: (editor: Editor) => {
 					console.debug("BlockUtilityPlugin: 'wrap-selection-latex-fence' command triggered.");
 					try {
 						this.wrapSelectionWithFence(editor, ':::latex', ':::end-latex', BLOCK_LABELS.LaTeX);
 					} catch (error) {
 						console.error("BlockUtilityPlugin: Error wrapping selection with latex block:", error);
-						new Notice("Block Utility: Failed to wrap selection with :::latex block. See console.");
+						new Notice('Block Utility: Failed to wrap selection with :::latex fence. See console.');
 					}
 				},
 			});
 			console.log("BlockUtilityPlugin: Registered 'wrap-selection-latex-fence' command.");
 
-			// Command to REMOVE fences from the current block
+			// Command to remove fences from the current selection
 			this.addCommand({
 				id: 'remove-current-block-fence',
-				name: 'Remove fences around block under cursor',
+				name: 'Remove fences around content under cursor',
 				editorCallback: (editor: Editor) => {
 					console.debug("BlockUtilityPlugin: 'remove-current-block-fence' command triggered.");
 					try {
 						this.removeBlockFence(editor);
 					} catch (error) {
-						console.error("BlockUtilityPlugin: Error removing fences from block:", error);
-						new Notice("Block Utility: Failed to remove block fences. See console.");
+					console.error('BlockUtilityPlugin: Error removing fences during command:', error);
+					new Notice('Block Utility: Failed to remove fences. See console.');
 					}
 				},
 			});
@@ -203,18 +249,19 @@ export default class BlockUtilityPlugin extends Plugin {
 
 	/**
 	 * @function findBlockBoundaries
-	 * @description Locates the boundaries (start and end lines) and type of a fenced code block (```),
-	 * LaTeX block ($$), or info fence block (:::box-info / :::tag-info) that contains the editor's
-	 * current cursor position.
-	 * It now skips indented (nested) fence markers to only use the root fence.
+	 * @description Locates the boundaries (start and end lines) and type of a fenced Markdown region (e.g.,
+	 * code fences ```/~~~ with optional info strings, LaTeX blocks $$, :::-style admonitions, and other
+	 * supported fences) that contains the editor's current cursor position. Inline fences are also detected
+	 * when no surrounding block fences are found.
+	 * It skips indented (nested) fence markers to only use the root fence.
 	 * @param {Editor} editor - The Obsidian Editor instance representing the current active editor.
 	 * Provides access to cursor position and document content.
 	 * Assumes the editor instance is valid and available.
 	 * @returns {BlockInfo} An object containing:
-	 * - `success`: boolean indicating if a valid block containing the cursor was found.
+	 * - `success`: boolean indicating if a valid fenced region containing the cursor was found.
 	 * - `startLine`: number, the 0-indexed line of the opening delimiter, or -1.
 	 * - `endLine`: number, the 0-indexed line of the closing delimiter, or -1.
-	 * - `blockType`: 'Code' | 'LaTeX' | 'BoxInfo' | 'TagInfo' | null, the type of block found.
+	 * - `blockType`: `BlockType | null`, the type of fenced content found.
 	 * - `errorMessage`: string | undefined, a message if success is false.
 	 * @throws {Error} This function aims to handle errors internally by returning `success: false` and an
 	 * `errorMessage`. However, unexpected errors during editor interaction (though unlikely
@@ -238,12 +285,39 @@ export default class BlockUtilityPlugin extends Plugin {
 		const totalLines = editor.lineCount();
 		console.debug(`BlockUtilityPlugin: Total lines in document: ${totalLines}`);
 
+		// Prefer inline fences first so repeated presses peel layers from the caret outward.
+		try {
+			const currentLineText = editor.getLine(currentLineNum);
+			const cursorPositions = this.collectCursorColumnsForLine(editor, currentLineNum, cursor);
+			const inlineFirst = this.findInlineFenceMatch(currentLineText, cursorPositions);
+			if (inlineFirst) {
+				console.debug(
+					`BlockUtilityPlugin: Inline fence (${inlineFirst.blockType}) detected on line ${currentLineNum} spanning ch ${inlineFirst.contentStart} to ${inlineFirst.contentEnd}.`,
+				);
+				return {
+					success: true,
+					startLine: currentLineNum,
+					endLine: currentLineNum,
+					blockType: inlineFirst.blockType,
+					startCh: inlineFirst.contentStart,
+					endCh: inlineFirst.contentEnd,
+					outerStartCh: inlineFirst.outerStart,
+					outerEndCh: inlineFirst.outerEnd,
+				};
+			}
+		} catch (err) {
+			console.warn(`BlockUtilityPlugin: Error performing inline-first detection on line ${currentLineNum}:`, err);
+		}
+
+		const cursorFenceState = this.getCursorFenceState(editor, currentLineNum);
+
 		let startLineNum = -1;
 		let endLineNum = -1;
 		let startDelimiter: BlockDelimiter | null = null;
 		let endDelimiter: BlockDelimiter | null = null;
 		let blockIndent: string | null = null;
 		let blockType: BlockType | null = null;
+		let closingMatcher: ((trimmedLine: string) => boolean) | null = null;
 
 		// Searching backwards for a root start delimiter while skipping indented fences.
 		console.debug(`BlockUtilityPlugin: Searching backwards for root start delimiter from line ${currentLineNum}.`);
@@ -262,84 +336,34 @@ export default class BlockUtilityPlugin extends Plugin {
 			const leadingWhitespaceLength = originalLine.length - trimmedLine.length;
 			const leadingWhitespace = leadingWhitespaceLength > 0 ? originalLine.slice(0, leadingWhitespaceLength) : '';
 
-			// Check for Code block start: allows optional indentation and language specifier.
-			if (trimmedLine.startsWith('```')) {
+			const detection = this.detectFenceStart(trimmedLine, normalizedLine, leadingWhitespace);
+			if (detection) {
+				if (!this.isFenceActiveAtCursor(detection, cursorFenceState)) {
+					continue;
+				}
 				startLineNum = i;
-				startDelimiter = '```';
-				endDelimiter = '```';
-				blockType = 'Code';
-				blockIndent = leadingWhitespace;
-				console.debug(`BlockUtilityPlugin: Found potential root Code block start '${startDelimiter}' at line ${i}.`);
-				break;
-			}
-			// Check for LaTeX block start: must not be indented.
-			else if (trimmedLine === '$$') {
-				startLineNum = i;
-				startDelimiter = '$$';
-				endDelimiter = '$$';
-				blockType = 'LaTeX';
-				blockIndent = leadingWhitespace;
-				console.debug(`BlockUtilityPlugin: Found potential root LaTeX block start '${startDelimiter}' at line ${i}.`);
-				break;
-			} else if (normalizedLine.startsWith(':::box-info')) {
-				startLineNum = i;
-				startDelimiter = ':::box-info';
-				endDelimiter = ':::end-box-info';
-				blockType = 'BoxInfo';
-				blockIndent = leadingWhitespace;
-				console.debug(`BlockUtilityPlugin: Found potential root Box Info block start at line ${i}.`);
-				break;
-			} else if (normalizedLine.startsWith(':::tag-info')) {
-				startLineNum = i;
-				startDelimiter = ':::tag-info';
-				endDelimiter = ':::end-tag-info';
-				blockType = 'TagInfo';
-				blockIndent = leadingWhitespace;
-				console.debug(`BlockUtilityPlugin: Found potential root Tag Info block start at line ${i}.`);
-				break;
-			} else if (normalizedLine.startsWith(':::latex')) {
-				startLineNum = i;
-				startDelimiter = ':::latex';
-				endDelimiter = ':::end-latex';
-				blockType = 'LaTeX';
-				blockIndent = leadingWhitespace;
-				console.debug(`BlockUtilityPlugin: Found potential root LaTeX fence block start at line ${i}.`);
+				startDelimiter = detection.startDelimiter;
+				endDelimiter = detection.endDelimiter;
+				blockType = detection.blockType;
+				blockIndent = detection.indent;
+				closingMatcher = detection.closingMatcher;
+				console.debug(
+					`BlockUtilityPlugin: Found potential root ${blockType} fence start '${trimmedLine}' at line ${i}.`,
+				);
 				break;
 			}
 		}
 
-		if (startLineNum === -1 || !blockType || !endDelimiter) {
-			let inlineLaTeXMatch: InlineLatexMatch | null = null;
-			try {
-				const currentLineText = editor.getLine(currentLineNum);
-				inlineLaTeXMatch = this.findInlineLatexRange(currentLineText, cursor.ch);
-			} catch (err) {
-				console.warn(`BlockUtilityPlugin: Error reading line ${currentLineNum} for inline LaTeX detection:`, err);
-			}
-
-			if (inlineLaTeXMatch) {
-				console.debug(`BlockUtilityPlugin: Inline LaTeX detected on line ${currentLineNum} spanning ch ${inlineLaTeXMatch.start} to ${inlineLaTeXMatch.end}.`);
+			if (startLineNum === -1 || !blockType || !endDelimiter || !closingMatcher) {
+				console.debug("BlockUtilityPlugin: No root start delimiter found enclosing the cursor.");
 				return {
-					success: true,
-					startLine: currentLineNum,
-					endLine: currentLineNum,
-					blockType: 'InlineLaTeX',
-					startCh: inlineLaTeXMatch.start,
-					endCh: inlineLaTeXMatch.end,
-					outerStartCh: inlineLaTeXMatch.outerStart,
-					outerEndCh: inlineLaTeXMatch.outerEnd,
+					success: false,
+					startLine: -1,
+					endLine: -1,
+					blockType: null,
+					errorMessage: 'Cursor is not inside a recognized Markdown fence.',
 				};
 			}
-
-			console.debug("BlockUtilityPlugin: No root start delimiter found enclosing the cursor.");
-			return {
-				success: false,
-				startLine: -1,
-				endLine: -1,
-				blockType: null,
-				errorMessage: "Cursor is not inside a recognized block (Code ``` , LaTeX $$ or :::latex, :::box-info, :::tag-info).",
-			};
-		}
 
 		// Searching forwards for a matching root end delimiter while skipping indented fences.
 		console.debug(`BlockUtilityPlugin: Searching forwards for root end delimiter '${endDelimiter}' from line ${startLineNum + 1}.`);
@@ -354,8 +378,6 @@ export default class BlockUtilityPlugin extends Plugin {
 				continue;
 			}
 
-			const normalizedLine = trimmedLine.toLowerCase();
-			const normalizedEnd = endDelimiter.toLowerCase();
 			const leadingWhitespaceLength = originalLine.length - trimmedLine.length;
 			const leadingWhitespace = leadingWhitespaceLength > 0 ? originalLine.slice(0, leadingWhitespaceLength) : '';
 			const indentMatches = blockIndent === null ? leadingWhitespaceLength === 0 : leadingWhitespace === blockIndent;
@@ -364,14 +386,7 @@ export default class BlockUtilityPlugin extends Plugin {
 				continue;
 			}
 
-			const isCodeFence = endDelimiter === '```';
-			const isDollarFence = endDelimiter === '$$';
-
-			if (
-				(isCodeFence && trimmedLine.startsWith('```') && trimmedLine.replace(/^```/, '').trim().length === 0) ||
-				(isDollarFence && trimmedLine === '$$') ||
-				(!isCodeFence && !isDollarFence && normalizedLine === normalizedEnd)
-			) {
+			if (closingMatcher && closingMatcher(trimmedLine)) {
 				endLineNum = i;
 				console.debug(`BlockUtilityPlugin: Found matching root end delimiter '${endDelimiter}' at line ${i}.`);
 				break;
@@ -380,16 +395,33 @@ export default class BlockUtilityPlugin extends Plugin {
 
 		if (endLineNum === -1) {
 			console.debug(`BlockUtilityPlugin: No matching root end delimiter '${endDelimiter}' found after line ${startLineNum}.`);
-			return { success: false, startLine: startLineNum, endLine: -1, blockType: blockType, errorMessage: `Could not find the closing ${endDelimiter} for this ${blockType} block.` };
+			const fenceLabel = getBlockLabel(blockType);
+			return {
+				success: false,
+				startLine: startLineNum,
+				endLine: -1,
+				blockType: blockType,
+				errorMessage: `Could not find a closing fence (${endDelimiter}) for this ${fenceLabel}.`,
+			};
 		}
 
 		// Ensure the cursor line is strictly between the start and end delimiter lines.
 		if (currentLineNum <= startLineNum || currentLineNum >= endLineNum) {
 			console.debug(`BlockUtilityPlugin: Cursor at line ${currentLineNum} is not strictly between start line ${startLineNum} and end line ${endLineNum}.`);
-			return { success: false, startLine: startLineNum, endLine: endLineNum, blockType: blockType, errorMessage: `Cursor is not inside this ${blockType} block's content area.` };
+			const fenceLabel = getBlockLabel(blockType);
+			return {
+				success: false,
+				startLine: startLineNum,
+				endLine: endLineNum,
+				blockType: blockType,
+				errorMessage: `Cursor is not inside this ${fenceLabel} fence's content area.`,
+			};
 		}
 
-		console.debug(`BlockUtilityPlugin: Successfully identified ${blockType} block from line ${startLineNum} to ${endLineNum}. Cursor is within content.`);
+		const fenceLabel = getBlockLabel(blockType);
+		console.debug(
+			`BlockUtilityPlugin: Successfully identified ${fenceLabel} fence from line ${startLineNum} to ${endLineNum}. Cursor is within content.`,
+		);
 		return { success: true, startLine: startLineNum, endLine: endLineNum, blockType: blockType };
 	}
 
@@ -446,34 +478,466 @@ export default class BlockUtilityPlugin extends Plugin {
 			);
 		}
 
-		new Notice(`${blockLabel} block inserted.`);
+		new Notice(`${blockLabel} fence inserted.`);
 	}
 
-	private findInlineLatexRange(lineText: string, cursorCh: number): InlineLatexMatch | null {
-		if (!lineText.includes('$$')) {
+	private collectCursorColumnsForLine(editor: Editor, line: number, cursor: EditorPosition): number[] {
+		const columns = new Set<number>();
+		if (cursor.line === line) {
+			columns.add(cursor.ch);
+		}
+
+		const selections = editor.listSelections?.();
+		if (selections) {
+			for (const selection of selections) {
+				if (selection.anchor.line === line) {
+					columns.add(selection.anchor.ch);
+				}
+				if (selection.head.line === line) {
+					columns.add(selection.head.ch);
+				}
+			}
+		}
+
+		return Array.from(columns).sort((a, b) => a - b);
+	}
+
+	private findInlineFenceMatch(lineText: string, cursorColumns: number[]): InlineFenceMatch | null {
+		if (!lineText || cursorColumns.length === 0) {
 			return null;
 		}
 
-		const inlinePattern = /(?<!\\)\$\$(.*?)(?<!\\)\$\$/g;
-		for (const match of lineText.matchAll(inlinePattern)) {
-			const matchIndex = match.index;
-			if (matchIndex === undefined) {
-				continue;
-			}
-			const matchText = match[0];
-			const startDelimiterEnd = matchIndex + 2;
-			const endDelimiterStart = matchIndex + matchText.length - 2;
+		const candidates = this.findInlineFenceCandidates(lineText);
+		if (candidates.length === 0) {
+			return null;
+		}
 
-			if (startDelimiterEnd > endDelimiterStart) {
-				continue;
+		candidates.sort((a, b) => {
+			if (a.outerStart !== b.outerStart) {
+				return a.outerStart - b.outerStart;
 			}
+			return b.outerEnd - a.outerEnd;
+		});
 
-			if (cursorCh >= startDelimiterEnd && cursorCh <= endDelimiterStart) {
-				return { start: startDelimiterEnd, end: endDelimiterStart, outerStart: matchIndex, outerEnd: matchIndex + matchText.length };
+		for (const candidate of candidates) {
+			const hasInsideCursor = cursorColumns.some(ch => ch > candidate.outerStart && ch < candidate.outerEnd);
+			const hasBoundarySelection = cursorColumns.includes(candidate.outerStart) && cursorColumns.includes(candidate.outerEnd);
+			if (hasInsideCursor || hasBoundarySelection) {
+				return candidate;
 			}
 		}
 
 		return null;
+	}
+
+	private findInlineFenceCandidates(lineText: string): InlineFenceMatch[] {
+		return [
+			...this.findInlineCodeMatches(lineText),
+			...this.findInlineMathMatches(lineText),
+			...this.findInlineFormattingMatches(lineText),
+		];
+	}
+
+	private detectFenceStart(trimmedLine: string, normalizedLine: string, leadingWhitespace: string): FenceDetection | null {
+		if (!trimmedLine) {
+			return null;
+		}
+
+		const backtickDetection = this.createCodeFenceDetection(trimmedLine, leadingWhitespace, '`');
+		if (backtickDetection) {
+			return backtickDetection;
+		}
+
+		const tildeDetection = this.createCodeFenceDetection(trimmedLine, leadingWhitespace, '~');
+		if (tildeDetection) {
+			return tildeDetection;
+		}
+
+		if (trimmedLine === '$$') {
+			return {
+				blockType: 'LaTeX',
+				startDelimiter: '$$',
+				endDelimiter: '$$',
+				indent: leadingWhitespace,
+				closingMatcher: candidate => candidate.trim() === '$$',
+			};
+		}
+
+		if (normalizedLine.startsWith(':::box-info')) {
+			return {
+				blockType: 'BoxInfo',
+				startDelimiter: ':::box-info',
+				endDelimiter: ':::end-box-info',
+				indent: leadingWhitespace,
+				closingMatcher: candidate => candidate.trim().toLowerCase() === ':::end-box-info',
+			};
+		}
+
+		if (normalizedLine.startsWith(':::tag-info')) {
+			return {
+				blockType: 'TagInfo',
+				startDelimiter: ':::tag-info',
+				endDelimiter: ':::end-tag-info',
+				indent: leadingWhitespace,
+				closingMatcher: candidate => candidate.trim().toLowerCase() === ':::end-tag-info',
+			};
+		}
+
+		if (normalizedLine.startsWith(':::latex')) {
+			return {
+				blockType: 'LaTeX',
+				startDelimiter: ':::latex',
+				endDelimiter: ':::end-latex',
+				indent: leadingWhitespace,
+				closingMatcher: candidate => candidate.trim().toLowerCase() === ':::end-latex',
+			};
+		}
+
+		if (trimmedLine.startsWith(':::')) {
+			const label = trimmedLine.slice(3).trim();
+			const lowerLabel = label.toLowerCase();
+			if (!label || lowerLabel.startsWith('end-')) {
+				return null;
+			}
+			return {
+				blockType: 'GenericFence',
+				startDelimiter: trimmedLine,
+				endDelimiter: ':::',
+				indent: leadingWhitespace,
+				closingMatcher: candidate => {
+					const trimmedCandidate = candidate.trim();
+					if (!trimmedCandidate.startsWith(':::')) {
+						return false;
+					}
+					const remainder = trimmedCandidate.slice(3).trim().toLowerCase();
+					if (!remainder) {
+						return true;
+					}
+					return remainder === `end-${lowerLabel}`;
+				},
+			};
+		}
+
+		return null;
+	}
+
+	private createCodeFenceDetection(
+		trimmedLine: string,
+		leadingWhitespace: string,
+		fenceChar: '`' | '~',
+	): FenceDetection | null {
+		if (!trimmedLine.startsWith(fenceChar.repeat(3))) {
+			return null;
+		}
+
+		const fenceLength = this.countLeadingFenceCharacters(trimmedLine, fenceChar);
+		if (fenceLength < 3) {
+			return null;
+		}
+
+		const fenceSequence = fenceChar.repeat(fenceLength);
+		return {
+			blockType: 'Code',
+			startDelimiter: fenceSequence,
+			endDelimiter: fenceSequence,
+			indent: leadingWhitespace,
+			closingMatcher: candidate => {
+				const trimmedCandidate = candidate.trim();
+				if (!trimmedCandidate.startsWith(fenceSequence)) {
+					return false;
+				}
+				const suffix = trimmedCandidate.slice(fenceSequence.length).trim();
+				return suffix.length === 0;
+			},
+		};
+	}
+
+	private countLeadingFenceCharacters(text: string, targetChar: string): number {
+		let count = 0;
+		for (let i = 0; i < text.length; i++) {
+			if (text[i] === targetChar) {
+				count++;
+			} else {
+				break;
+			}
+		}
+		return count;
+	}
+
+	private findInlineCodeMatches(lineText: string): InlineFenceMatch[] {
+		const matches: InlineFenceMatch[] = [];
+		const length = lineText.length;
+
+		for (let i = 0; i < length; i++) {
+			if (lineText[i] !== '`') {
+				continue;
+			}
+
+			let fenceLength = 1;
+			let j = i + 1;
+			while (j < length && lineText[j] === '`') {
+				fenceLength++;
+				j++;
+			}
+
+			const openingEnd = i + fenceLength;
+			let closingStart = -1;
+			let searchIndex = openingEnd;
+
+			while (searchIndex < length) {
+				if (lineText[searchIndex] === '`') {
+					let candidateLength = 1;
+					let candidateIndex = searchIndex + 1;
+					while (candidateIndex < length && lineText[candidateIndex] === '`') {
+						candidateLength++;
+						candidateIndex++;
+					}
+
+					if (candidateLength === fenceLength) {
+						closingStart = searchIndex;
+						const closingEnd = searchIndex + fenceLength;
+						matches.push({
+							blockType: 'InlineCode',
+							contentStart: openingEnd,
+							contentEnd: closingStart,
+							outerStart: i,
+							outerEnd: closingEnd,
+						});
+						i = closingEnd - 1;
+						break;
+					}
+
+					searchIndex = candidateIndex;
+					continue;
+				}
+				searchIndex++;
+			}
+
+			if (closingStart === -1) {
+				i = openingEnd - 1;
+			}
+		}
+
+		return matches;
+	}
+
+	private findInlineMathMatches(lineText: string): InlineFenceMatch[] {
+		const matches: InlineFenceMatch[] = [];
+		const length = lineText.length;
+
+		for (let i = 0; i < length; i++) {
+			if (lineText[i] !== '$' || this.isEscaped(lineText, i)) {
+				continue;
+			}
+
+			let fenceLength = 1;
+			if (i + 1 < length && lineText[i + 1] === '$' && !this.isEscaped(lineText, i + 1)) {
+				fenceLength = 2;
+			}
+
+			const openingEnd = i + fenceLength;
+			let closingStart = -1;
+			let searchIndex = openingEnd;
+
+			while (searchIndex < length) {
+				if (lineText[searchIndex] === '$' && !this.isEscaped(lineText, searchIndex)) {
+					let candidateLength = 1;
+					let candidateIndex = searchIndex + 1;
+					while (
+						candidateIndex < length &&
+						lineText[candidateIndex] === '$' &&
+						!this.isEscaped(lineText, candidateIndex)
+					) {
+						candidateLength++;
+						candidateIndex++;
+					}
+
+					if (candidateLength === fenceLength) {
+						closingStart = searchIndex;
+						const closingEnd = searchIndex + fenceLength;
+						matches.push({
+							blockType: fenceLength === 1 ? 'InlineMath' : 'InlineLaTeX',
+							contentStart: openingEnd,
+							contentEnd: closingStart,
+							outerStart: i,
+							outerEnd: closingEnd,
+						});
+						i = closingEnd - 1;
+						break;
+					}
+
+					searchIndex = candidateIndex;
+					continue;
+				}
+				searchIndex++;
+			}
+
+			if (closingStart === -1) {
+				i = openingEnd - 1;
+			}
+		}
+
+		return matches;
+	}
+
+	private findInlineFormattingMatches(lineText: string): InlineFenceMatch[] {
+		const matches: InlineFenceMatch[] = [];
+		const length = lineText.length;
+		if (length === 0) {
+			return matches;
+		}
+
+		const rules: InlineFormattingRule[] = [
+			{ char: '*', blockTypesByLength: { 3: 'InlineBoldItalic', 2: 'InlineBold', 1: 'InlineItalic' } },
+			{ char: '_', blockTypesByLength: { 3: 'InlineBoldItalic', 2: 'InlineBold', 1: 'InlineItalic' } },
+			{ char: '~', blockTypesByLength: { 2: 'InlineStrikethrough' } },
+			{ char: '=', blockTypesByLength: { 2: 'InlineHighlight' } },
+			{ char: '+', blockTypesByLength: { 2: 'InlineUnderline' } },
+		];
+
+		outer: for (let i = 0; i < length; i++) {
+			for (const rule of rules) {
+				if (lineText[i] !== rule.char || this.isEscaped(lineText, i)) {
+					continue;
+				}
+
+				const runLength = this.countSequentialCharacters(lineText, i, rule.char);
+				const candidateLengths = Object.keys(rule.blockTypesByLength)
+					.map(len => Number(len))
+					.filter(len => len <= runLength && len > 0)
+					.sort((a, b) => b - a);
+
+				if (candidateLengths.length === 0) {
+					continue;
+				}
+
+				for (const markerLength of candidateLengths) {
+					const closingMatch = this.findFormattingClosing(lineText, i + markerLength, rule.char, markerLength);
+					if (!closingMatch) {
+						continue;
+					}
+
+					const { closingStart, closingEnd } = closingMatch;
+					const innerContent = lineText.slice(i + markerLength, closingStart);
+					if (!this.isInlineFormattingContentValid(innerContent)) {
+						continue;
+					}
+
+					const blockType = rule.blockTypesByLength[markerLength];
+					if (!blockType) {
+						continue;
+					}
+
+					matches.push({
+						blockType,
+						contentStart: i + markerLength,
+						contentEnd: closingStart,
+						outerStart: i,
+						outerEnd: closingEnd,
+					});
+
+					i = closingEnd - 1;
+					continue outer;
+				}
+			}
+		}
+
+		return matches;
+	}
+
+	private findFormattingClosing(
+		lineText: string,
+		searchStart: number,
+		markerChar: string,
+		markerLength: number,
+	): { closingStart: number; closingEnd: number } | null {
+		const length = lineText.length;
+		let searchIndex = searchStart;
+
+		while (searchIndex < length) {
+			if (lineText[searchIndex] === markerChar && !this.isEscaped(lineText, searchIndex)) {
+				const candidateLength = this.countSequentialCharacters(lineText, searchIndex, markerChar);
+				if (candidateLength >= markerLength) {
+					return {
+						closingStart: searchIndex,
+						closingEnd: searchIndex + markerLength,
+					};
+				}
+				searchIndex += candidateLength > 0 ? candidateLength : 1;
+				continue;
+			}
+
+			searchIndex++;
+		}
+
+		return null;
+	}
+
+	private isInlineFormattingContentValid(content: string): boolean {
+		return content.length > 0 && /\S/.test(content);
+	}
+
+	private countSequentialCharacters(text: string, startIndex: number, targetChar: string): number {
+		let count = 0;
+		for (let i = startIndex; i < text.length; i++) {
+			if (text[i] !== targetChar) {
+				break;
+			}
+			count++;
+		}
+		return count;
+	}
+
+	private getCursorFenceState(editor: Editor, currentLine: number): CursorFenceState {
+		let inBacktickCode = false;
+		let inTildeCode = false;
+		let inDollarLatex = false;
+
+		for (let i = 0; i <= currentLine; i++) {
+			let line: string;
+			try {
+				line = editor.getLine(i);
+			} catch {
+				continue;
+			}
+
+			const trimmed = line.trim();
+			if (trimmed.startsWith('```')) {
+				inBacktickCode = !inBacktickCode;
+			}
+			if (trimmed.startsWith('~~~')) {
+				inTildeCode = !inTildeCode;
+			}
+			if (trimmed === '$$') {
+				inDollarLatex = !inDollarLatex;
+			}
+		}
+
+		return { inBacktickCode, inTildeCode, inDollarLatex };
+	}
+
+	private isFenceActiveAtCursor(detection: FenceDetection, state: CursorFenceState): boolean {
+		if (detection.startDelimiter.startsWith('```')) {
+			return state.inBacktickCode;
+		}
+
+		if (detection.startDelimiter.startsWith('~~~')) {
+			return state.inTildeCode;
+		}
+
+		if (detection.startDelimiter === '$$') {
+			return state.inDollarLatex;
+		}
+
+		return true;
+	}
+
+	private isEscaped(text: string, index: number): boolean {
+		let backslashCount = 0;
+		for (let i = index - 1; i >= 0 && text[i] === '\\'; i--) {
+			backslashCount++;
+		}
+		return backslashCount % 2 === 1;
 	}
 
 	private removeBlockFence(editor: Editor): void {
@@ -481,8 +945,8 @@ export default class BlockUtilityPlugin extends Plugin {
 		const blockInfo = this.findBlockBoundaries(editor);
 
 		if (!blockInfo.success || !blockInfo.blockType) {
-			console.warn(`BlockUtilityPlugin: Cannot remove fences because block was not identified: ${blockInfo.errorMessage}`);
-			new Notice(blockInfo.errorMessage || 'Block Utility: Could not identify block for fence removal.');
+			console.warn(`BlockUtilityPlugin: Cannot remove fences because fenced content was not identified: ${blockInfo.errorMessage}`);
+			new Notice(blockInfo.errorMessage || 'Block Utility: Could not identify fenced content for fence removal.');
 			return;
 		}
 
@@ -490,7 +954,7 @@ export default class BlockUtilityPlugin extends Plugin {
 
 		try {
 			if (
-				blockInfo.blockType === 'InlineLaTeX' &&
+				this.isInlineBlockType(blockInfo.blockType) &&
 				typeof blockInfo.startCh === 'number' &&
 				typeof blockInfo.endCh === 'number' &&
 				typeof blockInfo.outerStartCh === 'number' &&
@@ -502,12 +966,15 @@ export default class BlockUtilityPlugin extends Plugin {
 				const to = { line: blockInfo.endLine, ch: blockInfo.outerEndCh };
 				editor.replaceRange(innerContent, from, to);
 
-				const selectionStart: EditorPosition = { line: blockInfo.startLine, ch: blockInfo.outerStartCh };
-				const selectionEnd: EditorPosition = {
+				const caretOffset = blockInfo.startCh - blockInfo.outerStartCh;
+				const normalizedOffset = Number.isFinite(caretOffset)
+					? Math.max(0, Math.min(innerContent.length, caretOffset))
+					: 0;
+				const caretPosition: EditorPosition = {
 					line: blockInfo.startLine,
-					ch: blockInfo.outerStartCh + innerContent.length,
+					ch: blockInfo.outerStartCh + normalizedOffset,
 				};
-				editor.setSelection(selectionStart, selectionEnd);
+				editor.setSelection(caretPosition, caretPosition);
 			} else {
 				const contentLineCount = blockInfo.endLine - blockInfo.startLine - 1;
 				this.removeFenceLine(editor, blockInfo.endLine);
@@ -527,11 +994,11 @@ export default class BlockUtilityPlugin extends Plugin {
 				}
 			}
 
-			console.log(`BlockUtilityPlugin: Removed fences around ${blockLabel} block.`);
-			new Notice(`${blockLabel} block fences removed.`);
+			console.log(`BlockUtilityPlugin: Removed fences around ${blockLabel}.`);
+			new Notice(`${blockLabel} fences removed.`);
 		} catch (error) {
-			console.error('BlockUtilityPlugin: Error while removing block fences:', error);
-			new Notice(`Block Utility: Error removing ${blockLabel} block fences.`);
+			console.error('BlockUtilityPlugin: Error while removing fences:', error);
+			new Notice(`Block Utility: Error removing ${blockLabel} fences.`);
 		}
 	}
 
@@ -549,9 +1016,36 @@ export default class BlockUtilityPlugin extends Plugin {
 		editor.replaceRange('', from, to);
 	}
 
+	private isInlineBlockType(
+		blockType: BlockType | null,
+	): blockType is Extract<
+		BlockType,
+		| 'InlineLaTeX'
+		| 'InlineMath'
+		| 'InlineCode'
+		| 'InlineItalic'
+		| 'InlineBold'
+		| 'InlineBoldItalic'
+		| 'InlineUnderline'
+		| 'InlineStrikethrough'
+		| 'InlineHighlight'
+	> {
+		return (
+			blockType === 'InlineLaTeX' ||
+			blockType === 'InlineMath' ||
+			blockType === 'InlineCode' ||
+			blockType === 'InlineItalic' ||
+			blockType === 'InlineBold' ||
+			blockType === 'InlineBoldItalic' ||
+			blockType === 'InlineUnderline' ||
+			blockType === 'InlineStrikethrough' ||
+			blockType === 'InlineHighlight'
+		);
+	}
+
 	/**
 	 * @function copyBlockUnderCursor
-	 * @description Finds the block containing the cursor and copies its content (excluding delimiters)
+	 * @description Finds the fenced region containing the cursor and copies its content (excluding delimiters)
 	 * to the system clipboard. Provides user feedback via Notices.
 	 * @param {Editor} editor - The Obsidian Editor instance. Assumed to be valid.
 	 * @returns {void}
@@ -564,7 +1058,7 @@ export default class BlockUtilityPlugin extends Plugin {
 
 		if (!blockInfo.success) {
 			console.warn(`BlockUtilityPlugin: Failed to find block boundaries for copy: ${blockInfo.errorMessage}`);
-			new Notice(blockInfo.errorMessage || "Block Utility: Could not identify block for copying.");
+			new Notice(blockInfo.errorMessage || 'Block Utility: Could not identify fenced content for copying.');
 			return;
 		}
 
@@ -574,15 +1068,17 @@ export default class BlockUtilityPlugin extends Plugin {
 
 		try {
 			if (
-				blockInfo.blockType === 'InlineLaTeX' &&
+				this.isInlineBlockType(blockInfo.blockType) &&
 				typeof blockInfo.startCh === 'number' &&
 				typeof blockInfo.endCh === 'number'
 			) {
-				console.debug(`BlockUtilityPlugin: Extracting inline LaTeX content on line ${blockInfo.startLine} between ch ${blockInfo.startCh} and ${blockInfo.endCh}.`);
+				console.debug(
+					`BlockUtilityPlugin: Extracting inline content (${blockInfo.blockType}) on line ${blockInfo.startLine} between ch ${blockInfo.startCh} and ${blockInfo.endCh}.`,
+				);
 				const lineText = editor.getLine(blockInfo.startLine);
 				blockContent = lineText.slice(blockInfo.startCh, blockInfo.endCh);
 			} else {
-				console.debug(`BlockUtilityPlugin: Extracting content for ${blockLabel} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
+				console.debug(`BlockUtilityPlugin: Extracting content for ${blockLabel} (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
 				for (let i = blockInfo.startLine + 1; i < blockInfo.endLine; i++) {
 					blockContent += editor.getLine(i) + '\n';
 				}
@@ -592,24 +1088,24 @@ export default class BlockUtilityPlugin extends Plugin {
 			}
 			console.debug(`BlockUtilityPlugin: Extracted content length: ${blockContent.length}`);
 		} catch (error) {
-			console.error("BlockUtilityPlugin: Error during content extraction:", error);
-			new Notice(`Block Utility: Error extracting content from ${blockLabel} block.`);
+			console.error('BlockUtilityPlugin: Error during content extraction:', error);
+			new Notice(`Block Utility: Error extracting content from ${blockLabel}.`);
 			return;
 		}
 
 		console.debug("BlockUtilityPlugin: Attempting to write content to clipboard.");
 		navigator.clipboard.writeText(blockContent).then(() => {
-			console.log(`BlockUtilityPlugin: Successfully copied ${blockLabel} block content to clipboard.`);
-			new Notice(`${blockLabel} block content copied!`);
+			console.log(`BlockUtilityPlugin: Successfully copied ${blockLabel} content to clipboard.`);
+			new Notice(`${blockLabel} content copied!`);
 		}).catch(err => {
-			console.error(`BlockUtilityPlugin: Failed to copy ${blockLabel} block content to clipboard: `, err);
-			new Notice(`Block Utility: Error copying ${blockLabel} block content. See console.`);
+			console.error(`BlockUtilityPlugin: Failed to copy ${blockLabel} content to clipboard: `, err);
+			new Notice(`Block Utility: Error copying ${blockLabel} content. See console.`);
 		});
 	}
 
 	/**
 	 * @function selectBlockUnderCursor
-	 * @description Finds the block containing the cursor and selects its content (excluding delimiters)
+	 * @description Finds the fenced region containing the cursor and selects its content (excluding delimiters)
 	 * within the Obsidian editor.
 	 * @param {Editor} editor - The Obsidian Editor instance. Assumed to be valid.
 	 * @returns {void}
@@ -622,18 +1118,20 @@ export default class BlockUtilityPlugin extends Plugin {
 
 		if (!blockInfo.success) {
 			console.warn(`BlockUtilityPlugin: Failed to find block boundaries for select: ${blockInfo.errorMessage}`);
-			new Notice(blockInfo.errorMessage || "Block Utility: Could not identify block for selection.");
+			new Notice(blockInfo.errorMessage || 'Block Utility: Could not identify fenced content for selection.');
 			return;
 		}
 
 		const blockLabel = getBlockLabel(blockInfo.blockType);
 
 		if (
-			blockInfo.blockType === 'InlineLaTeX' &&
+			this.isInlineBlockType(blockInfo.blockType) &&
 			typeof blockInfo.startCh === 'number' &&
 			typeof blockInfo.endCh === 'number'
 		) {
-			console.debug(`BlockUtilityPlugin: Selecting inline LaTeX content on line ${blockInfo.startLine} between ch ${blockInfo.startCh} and ${blockInfo.endCh}.`);
+			console.debug(
+				`BlockUtilityPlugin: Selecting inline content (${blockInfo.blockType}) on line ${blockInfo.startLine} between ch ${blockInfo.startCh} and ${blockInfo.endCh}.`,
+			);
 			const anchorPos: EditorPosition = {
 				line: blockInfo.startLine,
 				ch: blockInfo.startCh,
@@ -643,11 +1141,11 @@ export default class BlockUtilityPlugin extends Plugin {
 				ch: blockInfo.endCh,
 			};
 			editor.setSelection(anchorPos, headPos);
-			console.log(`BlockUtilityPlugin: Successfully selected content of ${blockLabel} block.`);
+			console.log(`BlockUtilityPlugin: Successfully selected content of ${blockLabel}.`);
 			return;
 		}
 
-		console.debug(`BlockUtilityPlugin: Calculating selection range for ${blockLabel} block (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
+		console.debug(`BlockUtilityPlugin: Calculating selection range for ${blockLabel} (lines ${blockInfo.startLine + 1} to ${blockInfo.endLine - 1}).`);
 		const firstContentLine = blockInfo.startLine + 1;
 		const lastContentLine = blockInfo.endLine - 1;
 
@@ -677,11 +1175,11 @@ export default class BlockUtilityPlugin extends Plugin {
 
 			console.debug("BlockUtilityPlugin: Setting editor selection.");
 			editor.setSelection(anchorPos, headPos);
-			console.log(`BlockUtilityPlugin: Successfully selected content of ${blockLabel} block.`);
+			console.log(`BlockUtilityPlugin: Successfully selected content of ${blockLabel}.`);
 
 		} catch (error) {
-			console.error("BlockUtilityPlugin: Error during content selection:", error);
-			new Notice(`Block Utility: Error selecting content within ${blockLabel} block.`);
+			console.error('BlockUtilityPlugin: Error during content selection:', error);
+			new Notice(`Block Utility: Error selecting content within ${blockLabel}.`);
 		}
 	}
 }

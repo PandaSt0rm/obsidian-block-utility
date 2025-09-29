@@ -1,9 +1,9 @@
 {
 	"id": "obsidian-block-utility",
 	"name": "Block Utility",
-	"version": "1.5.0",
+	"version": "2.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Provides hotkeys to copy or select content within Code (```), LaTeX ($$), box-info, or tag-info blocks.",
+	"description": "Provides hotkeys to work with Markdown fences (code, math, info, inline) in Obsidian.",
 	"author": "PandaSt0rm",
 	"authorUrl": "",
 	"isDesktopOnly": true

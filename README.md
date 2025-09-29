@@ -2,13 +2,13 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Block Utility adds quick actions for common fenced content in Obsidian. It understands Markdown code blocks (``` ... ```), math fences ($$ ... $$), and the release-tool info fences (:::box-info ... :::end-box-info / :::tag-info ... :::end-tag-info) plus :::latex. You can copy, select, or wrap content without manually managing delimiters.
+Block Utility adds quick actions for Markdown fences in Obsidian. It understands code fences (```...``` and ~~~...~~~), math fences (both $$...$$ blocks and inline $...$), inline code, inline emphasis (bold, italic, underline, strikethrough, highlight), and the release-tool info fences (:::box-info / :::tag-info / :::latex) as well as other :::-style fences. You can copy, select, remove, or wrap content without manually managing delimiters.
 
 ## Commands
 
-- Copy block under cursor (Code/LaTeX/Info)
-- Select block under cursor (Code/LaTeX/Info)
-- Remove selected block (Code/LaTeX/Info)
-- Wrap selection with :::box-info block
-- Wrap selection with :::tag-info block
-- Wrap selection with :::latex block
+- Copy fenced content under cursor
+- Select fenced content under cursor
+- Remove fences around content under cursor
+- Wrap selection with :::box-info fence
+- Wrap selection with :::tag-info fence
+- Wrap selection with :::latex fence
